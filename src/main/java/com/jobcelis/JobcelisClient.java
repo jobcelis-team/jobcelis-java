@@ -124,10 +124,37 @@ public class JobcelisClient {
 
     // ── Webhooks ──────────────────────────────────────────────────────────
 
-    /** Create a webhook. */
+    /**
+     * Create a webhook.
+     *
+     * <p>The {@code extra} map may include a {@code "rate_limit"} key with a nested map
+     * containing {@code "max_per_second"} and/or {@code "max_per_minute"} to throttle
+     * outbound delivery rates.</p>
+     */
     public JsonObject createWebhook(String url, Map<String, Object> extra) throws JobcelisException, IOException {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("url", url);
+        if (extra != null) body.putAll(extra);
+        return post("/api/v1/webhooks", body);
+    }
+
+    /**
+     * Create a webhook with outbound rate limiting.
+     *
+     * @param url          The webhook endpoint URL.
+     * @param maxPerSecond Maximum deliveries per second (null to omit).
+     * @param maxPerMinute Maximum deliveries per minute (null to omit).
+     * @param extra        Additional webhook parameters (topics, secret, etc.).
+     */
+    public JsonObject createWebhook(String url, Integer maxPerSecond, Integer maxPerMinute, Map<String, Object> extra) throws JobcelisException, IOException {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("url", url);
+        if (maxPerSecond != null || maxPerMinute != null) {
+            Map<String, Object> rateLimit = new LinkedHashMap<>();
+            if (maxPerSecond != null) rateLimit.put("max_per_second", maxPerSecond);
+            if (maxPerMinute != null) rateLimit.put("max_per_minute", maxPerMinute);
+            body.put("rate_limit", rateLimit);
+        }
         if (extra != null) body.putAll(extra);
         return post("/api/v1/webhooks", body);
     }
@@ -145,9 +172,36 @@ public class JobcelisClient {
         return get("/api/v1/webhooks", params);
     }
 
-    /** Update a webhook. */
+    /**
+     * Update a webhook.
+     *
+     * <p>The {@code data} map may include a {@code "rate_limit"} key with a nested map
+     * containing {@code "max_per_second"} and/or {@code "max_per_minute"} to throttle
+     * outbound delivery rates. Pass {@code null} for the {@code "rate_limit"} key to
+     * remove rate limiting.</p>
+     */
     public JsonObject updateWebhook(String webhookId, Map<String, Object> data) throws JobcelisException, IOException {
         return patch("/api/v1/webhooks/" + webhookId, data);
+    }
+
+    /**
+     * Update a webhook with outbound rate limiting.
+     *
+     * @param webhookId    The webhook ID.
+     * @param maxPerSecond Maximum deliveries per second (null to omit).
+     * @param maxPerMinute Maximum deliveries per minute (null to omit).
+     * @param data         Additional webhook fields to update (url, topics, etc.).
+     */
+    public JsonObject updateWebhook(String webhookId, Integer maxPerSecond, Integer maxPerMinute, Map<String, Object> data) throws JobcelisException, IOException {
+        Map<String, Object> body = new LinkedHashMap<>();
+        if (data != null) body.putAll(data);
+        if (maxPerSecond != null || maxPerMinute != null) {
+            Map<String, Object> rateLimit = new LinkedHashMap<>();
+            if (maxPerSecond != null) rateLimit.put("max_per_second", maxPerSecond);
+            if (maxPerMinute != null) rateLimit.put("max_per_minute", maxPerMinute);
+            body.put("rate_limit", rateLimit);
+        }
+        return patch("/api/v1/webhooks/" + webhookId, body);
     }
 
     /** Delete a webhook. */
@@ -163,6 +217,11 @@ public class JobcelisClient {
     /** List available webhook templates. */
     public JsonObject webhookTemplates() throws JobcelisException, IOException {
         return get("/api/v1/webhooks/templates");
+    }
+
+    /** Send a test delivery to a webhook. */
+    public JsonObject testWebhook(String webhookId) throws JobcelisException, IOException {
+        return post("/api/v1/webhooks/" + webhookId + "/test", Map.of());
     }
 
     // ── Deliveries ────────────────────────────────────────────────────────
@@ -564,6 +623,68 @@ public class JobcelisClient {
         doDelete("/api/v1/me/object");
     }
 
+    // ── Embed Tokens ─────────────────────────────────────────────────────
+
+    /** List embed tokens. */
+    public JsonObject listEmbedTokens() throws JobcelisException, IOException {
+        return get("/api/v1/embed/tokens");
+    }
+
+    /** Create an embed token. */
+    public JsonObject createEmbedToken(JsonObject config) throws JobcelisException, IOException {
+        Map<String, Object> body = GSON.fromJson(config, Map.class);
+        return post("/api/v1/embed/tokens", body);
+    }
+
+    /** Revoke an embed token. */
+    public void revokeEmbedToken(String id) throws JobcelisException, IOException {
+        doDelete("/api/v1/embed/tokens/" + id);
+    }
+
+    // ── Notification Channels ────────────────────────────────────────────
+
+    /** Get the notification channel configuration. */
+    public JsonObject getNotificationChannel() throws JobcelisException, IOException {
+        return get("/api/v1/notification-channels");
+    }
+
+    /** Create or update the notification channel configuration. */
+    public JsonObject upsertNotificationChannel(JsonObject config) throws JobcelisException, IOException {
+        return put("/api/v1/notification-channels", config);
+    }
+
+    /** Delete the notification channel configuration. */
+    public void deleteNotificationChannel() throws JobcelisException, IOException {
+        doDelete("/api/v1/notification-channels");
+    }
+
+    /** Send a test notification to the configured channel. */
+    public JsonObject testNotificationChannel() throws JobcelisException, IOException {
+        return post("/api/v1/notification-channels/test", Map.of());
+    }
+
+    // ── Retention & Purge ──────────────────────────────────────────────────
+
+    /** Get current retention policy. */
+    public JsonObject getRetentionPolicy() throws JobcelisException, IOException {
+        return get("/api/v1/retention");
+    }
+
+    /** Update retention policy. */
+    public JsonObject updateRetentionPolicy(Map<String, Object> policy) throws JobcelisException, IOException {
+        return patch("/api/v1/retention", policy);
+    }
+
+    /** Preview a purge operation. */
+    public JsonObject previewPurge(Map<String, Object> params) throws JobcelisException, IOException {
+        return post("/api/v1/purge/preview", params);
+    }
+
+    /** Execute a purge operation. */
+    public JsonObject purgeData(Map<String, Object> params) throws JobcelisException, IOException {
+        return post("/api/v1/purge", params);
+    }
+
     // ── Health ─────────────────────────────────────────────────────────────
 
     /** Check API health. */
@@ -588,6 +709,11 @@ public class JobcelisClient {
 
     private JsonObject post(String path, Map<String, Object> body) throws JobcelisException, IOException {
         return request("POST", path, Map.of(), body);
+    }
+
+    private JsonObject put(String path, JsonObject body) throws JobcelisException, IOException {
+        Map<String, Object> map = GSON.fromJson(body, Map.class);
+        return request("PUT", path, Map.of(), map);
     }
 
     private JsonObject patch(String path, Map<String, Object> body) throws JobcelisException, IOException {

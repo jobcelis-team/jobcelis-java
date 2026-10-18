@@ -1,0 +1,91 @@
+# Publishes automatically when the version below changes on main:
+#   1. reads the version from pom.xml
+#   2. if Maven Central does not have it yet, signs it and publishes it
+#   3. tags the commit (vX.Y.Z)
+# Bump the version in pom.xml to release; any other change publishes nothing.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          server-id: central
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Read version
+        id: v
+        run: |
+          VERSION=$(mvn -q help:evaluate -Dexpression=project.version -DforceStdout)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Already released?
+        id: check
+        env:
+          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          MISSING=""
+          [ -n "$MAVEN_USERNAME" ] || MISSING="$MISSING MAVEN_USERNAME"
+          [ -n "$MAVEN_PASSWORD" ] || MISSING="$MISSING MAVEN_PASSWORD"
+          [ -n "$GPG_PRIVATE_KEY" ] || MISSING="$MISSING GPG_PRIVATE_KEY"
+          [ -n "$GPG_PASSPHRASE" ] || MISSING="$MISSING GPG_PASSPHRASE"
+          if [ -n "$MISSING" ]; then
+            echo "::warning::Not publishing: add the repository secret(s)$MISSING, then run this workflow again (Actions > Release > Run workflow)."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://repo1.maven.org/maven2/com/jobcelis/jobcelis/${{ steps.v.outputs.version }}/jobcelis-${{ steps.v.outputs.version }}.pom")
+          if [ "$CODE" = "200" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.v.outputs.version }} is already published: nothing to do"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to Maven Central
+        if: steps.check.outputs.release == 'true'
+        env:
+          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: mvn -B deploy -P release
+
+      - name: Tag the release
+        if: steps.check.outputs.release == 'true'
+        run: |
+          TAG="${{ steps.v.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "$TAG"
+            git push origin "$TAG"
+          fi

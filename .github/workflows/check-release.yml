@@ -1,0 +1,40 @@
+# Builds and signs the exact bundle that Release uploads to Maven Central, without
+# uploading it, and checks it against Central's rules. A pull request that would
+# break publishing fails here instead of at release time. Signs with a throwaway
+# key, so it needs no secrets.
+name: Check release
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Throwaway signing key
+        run: gpg --batch --passphrase ci-check --quick-gen-key "CI check" rsa3072 sign 1d
+
+      - name: Build the bundle (no upload)
+        env:
+          MAVEN_GPG_PASSPHRASE: ci-check
+        run: |
+          printf '<settings><servers><server><id>central</id><username>x</username><password>x</password></server></servers></settings>' > "$RUNNER_TEMP/settings.xml"
+          mvn -B -s "$RUNNER_TEMP/settings.xml" deploy -P release -DskipUpload=true
+
+      - name: Check the bundle
+        run: |
+          VERSION=$(mvn -q help:evaluate -Dexpression=project.version -DforceStdout)
+          mkdir "$RUNNER_TEMP/bundle"
+          unzip -q target/central-publishing/central-bundle.zip -d "$RUNNER_TEMP/bundle"
+          .github/scripts/check-central-bundle.sh "$RUNNER_TEMP/bundle" com.jobcelis jobcelis "$VERSION" --checksums

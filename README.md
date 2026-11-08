@@ -74,6 +74,9 @@ var result = client.verifyMfa(accessToken, "123456");
 // Send a single event
 var event = client.sendEvent("order.created", Map.of("order_id", "123", "amount", 99.99));
 
+// Send a single event with your own idempotency key
+var same = client.sendEvent("order.created", Map.of("order_id", "123"), "order-123-created");
+
 // Send batch events (up to 1000)
 var batch = client.sendEvents(List.of(
     Map.of("topic", "order.created", "payload", Map.of("order_id", "1")),
@@ -313,6 +316,23 @@ try {
 } catch (IOException e) {
     System.out.println("Network error: " + e.getMessage());
 }
+```
+
+## Retries
+
+The client retries failed requests automatically, so a short API outage (for example during a deploy) does not lose your calls:
+
+- **What is retried:** network errors (connection refused or reset, DNS, TLS, timeouts) and HTTP `429`, `502`, `503` and `504`. Other errors (`400`, `401`, `404`, `500`, ...) are thrown right away, as before.
+- **Backoff:** 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s between attempts (±20 % jitter). A `Retry-After` header from the API is honoured (up to 60 s).
+- **Default:** 6 retries, about 60 seconds in total. After the last retry the same `JobcelisException` or `IOException` as before is thrown.
+- **POST requests** are retried on `429`/`502`/`503`/`504`, but after a network error only when they carry an idempotency key.
+- **Events never duplicate:** `sendEvent` sends an `X-Idempotency-Key` header (a random UUID, or the key you pass as the third argument) and reuses it on every retry. `sendEvents` adds an `idempotency_key` to every event that does not have one.
+
+Change or disable retries with the third constructor argument:
+
+```java
+var client = new JobcelisClient("your_api_key", "https://jobcelis.com", 3); // at most 3 retries
+var noRetries = new JobcelisClient("your_api_key", "https://jobcelis.com", 0); // disabled
 ```
 
 ## Webhook Signature Verification

@@ -6,15 +6,23 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Client for the Jobcelis Event Infrastructure Platform API.
@@ -25,14 +33,33 @@ import java.util.Scanner;
  * JobcelisClient client = new JobcelisClient("your_api_key");
  * JsonObject event = client.sendEvent("order.created", Map.of("order_id", "123"));
  * }</pre>
+ *
+ * <p>Requests that fail with a network error or with HTTP 429, 502, 503 or 504 are retried
+ * automatically with exponential backoff (up to {@link #DEFAULT_MAX_RETRIES} times by default).
+ * POST requests are retried after a network error only when they carry an idempotency key,
+ * which {@link #sendEvent} and {@link #sendEvents} always do.</p>
  */
 public class JobcelisClient {
+    /** Number of retries used when none is given to the constructor. */
+    public static final int DEFAULT_MAX_RETRIES = 6;
+
     private static final String DEFAULT_BASE_URL = "https://jobcelis.com";
+    private static final String IDEMPOTENCY_HEADER = "X-Idempotency-Key";
+    private static final long BASE_DELAY_MILLIS = 1_000;
+    private static final long MAX_DELAY_MILLIS = 30_000;
+    private static final long MAX_RETRY_AFTER_MILLIS = 60_000;
     private static final Gson GSON = new Gson();
+
+    /** Waits between retries; replaced in tests so they do not sleep. */
+    interface Sleeper {
+        void sleep(long millis) throws InterruptedException;
+    }
 
     private final String apiKey;
     private final String baseURL;
+    private final int maxRetries;
     private String authToken;
+    Sleeper sleeper = Thread::sleep;
 
     /**
      * Create a new client with the default base URL.
@@ -50,8 +77,28 @@ public class JobcelisClient {
      * @param baseURL Base URL of the Jobcelis API.
      */
     public JobcelisClient(String apiKey, String baseURL) {
+        this(apiKey, baseURL, DEFAULT_MAX_RETRIES);
+    }
+
+    /**
+     * Create a new client with a custom base URL and retry limit.
+     *
+     * @param apiKey     Your Jobcelis API key.
+     * @param baseURL    Base URL of the Jobcelis API.
+     * @param maxRetries How many times a failed request is retried (0 disables retries).
+     */
+    public JobcelisClient(String apiKey, String baseURL, int maxRetries) {
+        if (maxRetries < 0) {
+            throw new IllegalArgumentException("maxRetries must be 0 or greater");
+        }
         this.apiKey = apiKey;
         this.baseURL = baseURL.endsWith("/") ? baseURL.substring(0, baseURL.length() - 1) : baseURL;
+        this.maxRetries = maxRetries;
+    }
+
+    /** How many times a failed request is retried. */
+    public int getMaxRetries() {
+        return maxRetries;
     }
 
     /** Set JWT bearer token for authenticated requests. */
@@ -87,14 +134,41 @@ public class JobcelisClient {
 
     // ── Events ────────────────────────────────────────────────────────────
 
-    /** Send a single event. */
+    /**
+     * Send a single event. A random idempotency key is generated so that automatic retries
+     * never create the event twice.
+     */
     public JsonObject sendEvent(String topic, Map<String, Object> payload) throws JobcelisException, IOException {
-        return post("/api/v1/events", Map.of("topic", topic, "payload", payload));
+        return sendEvent(topic, payload, null);
     }
 
-    /** Send up to 1000 events in a batch. */
+    /**
+     * Send a single event with your own idempotency key (sent as the {@code X-Idempotency-Key}
+     * header). When {@code idempotencyKey} is null a random one is generated.
+     */
+    public JsonObject sendEvent(String topic, Map<String, Object> payload, String idempotencyKey) throws JobcelisException, IOException {
+        String key = idempotencyKey != null ? idempotencyKey : UUID.randomUUID().toString();
+        return request("POST", "/api/v1/events", Map.of(), Map.of("topic", topic, "payload", payload),
+                Map.of(IDEMPOTENCY_HEADER, key));
+    }
+
+    /**
+     * Send up to 1000 events in a batch. Every event without an {@code idempotency_key} gets a
+     * random one so that automatic retries never create an event twice.
+     */
     public JsonObject sendEvents(List<Map<String, Object>> events) throws JobcelisException, IOException {
-        return post("/api/v1/events/batch", Map.of("events", events));
+        List<Map<String, Object>> withKeys = new ArrayList<>(events.size());
+        for (Map<String, Object> event : events) {
+            if (event != null && event.get("idempotency_key") == null) {
+                Map<String, Object> copy = new LinkedHashMap<>(event);
+                copy.put("idempotency_key", UUID.randomUUID().toString());
+                withKeys.add(copy);
+            } else {
+                withKeys.add(event);
+            }
+        }
+        return request("POST", "/api/v1/events/batch", Map.of(), Map.of("events", withKeys),
+                Map.of(), true);
     }
 
     /** Get event details. */
@@ -737,80 +811,170 @@ public class JobcelisClient {
     }
 
     private String getRaw(String path, Map<String, String> params) throws JobcelisException, IOException {
-        String url = buildURL(path, params);
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod("GET");
-        conn.setRequestProperty("X-Api-Key", apiKey);
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("X-Api-Key", apiKey);
         if (authToken != null) {
-            conn.setRequestProperty("Authorization", "Bearer " + authToken);
+            headers.put("Authorization", "Bearer " + authToken);
         }
-        return handleRawResponse(conn);
+        return handleRawResponse(execute("GET", buildURL(path, params), headers, null, false));
     }
 
     private JsonObject publicPost(String path, Map<String, Object> body) throws JobcelisException, IOException {
-        String url = baseURL + path;
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
-
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(GSON.toJson(body).getBytes(StandardCharsets.UTF_8));
-        }
-
-        return handleResponse(conn);
+        byte[] payload = GSON.toJson(body).getBytes(StandardCharsets.UTF_8);
+        HttpResult result = execute("POST", baseURL + path, Map.of("Content-Type", "application/json"), payload, false);
+        return handleResponse(result);
     }
 
     private JsonObject request(String method, String path, Map<String, String> params, Map<String, Object> body) throws JobcelisException, IOException {
-        String url = buildURL(path, params);
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(method.equals("PATCH") ? "POST" : method);
-        if (method.equals("PATCH")) {
-            conn.setRequestProperty("X-HTTP-Method-Override", "PATCH");
-        }
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("X-Api-Key", apiKey);
-        if (authToken != null) {
-            conn.setRequestProperty("Authorization", "Bearer " + authToken);
-        }
-
-        if (body != null && (method.equals("POST") || method.equals("PATCH") || method.equals("PUT"))) {
-            conn.setDoOutput(true);
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(GSON.toJson(body).getBytes(StandardCharsets.UTF_8));
-            }
-        }
-
-        return handleResponse(conn);
+        return request(method, path, params, body, Map.of(), false);
     }
 
-    private JsonObject handleResponse(HttpURLConnection conn) throws JobcelisException, IOException {
-        int statusCode = conn.getResponseCode();
+    private JsonObject request(String method, String path, Map<String, String> params, Map<String, Object> body,
+                               Map<String, String> extraHeaders) throws JobcelisException, IOException {
+        return request(method, path, params, body, extraHeaders, extraHeaders.containsKey(IDEMPOTENCY_HEADER));
+    }
 
-        if (statusCode == 204) {
+    private JsonObject request(String method, String path, Map<String, String> params, Map<String, Object> body,
+                               Map<String, String> extraHeaders, boolean idempotencyKey) throws JobcelisException, IOException {
+        Map<String, String> headers = new LinkedHashMap<>();
+        if (method.equals("PATCH")) {
+            headers.put("X-HTTP-Method-Override", "PATCH");
+        }
+        headers.put("Content-Type", "application/json");
+        headers.put("Accept", "application/json");
+        headers.put("X-Api-Key", apiKey);
+        if (authToken != null) {
+            headers.put("Authorization", "Bearer " + authToken);
+        }
+        headers.putAll(extraHeaders);
+
+        byte[] payload = null;
+        if (body != null && (method.equals("POST") || method.equals("PATCH") || method.equals("PUT"))) {
+            payload = GSON.toJson(body).getBytes(StandardCharsets.UTF_8);
+        }
+
+        HttpResult result = execute(method, buildURL(path, params), headers, payload, idempotencyKey);
+        return handleResponse(result);
+    }
+
+    private JsonObject handleResponse(HttpResult result) throws JobcelisException {
+        if (result.statusCode == 204) {
             return new JsonObject();
         }
 
-        String responseBody = readStream(statusCode >= 400 ? conn.getErrorStream() : conn.getInputStream());
-
-        if (statusCode >= 400) {
-            throw new JobcelisException(statusCode, responseBody);
+        if (result.statusCode >= 400) {
+            throw new JobcelisException(result.statusCode, result.body);
         }
 
-        JsonElement element = JsonParser.parseString(responseBody);
+        JsonElement element = JsonParser.parseString(result.body);
         return element.isJsonObject() ? element.getAsJsonObject() : new JsonObject();
     }
 
-    private String handleRawResponse(HttpURLConnection conn) throws JobcelisException, IOException {
-        int statusCode = conn.getResponseCode();
-
-        if (statusCode >= 400) {
-            String errorBody = readStream(conn.getErrorStream());
-            throw new JobcelisException(statusCode, errorBody);
+    private String handleRawResponse(HttpResult result) throws JobcelisException {
+        if (result.statusCode >= 400) {
+            throw new JobcelisException(result.statusCode, result.body);
         }
+        return result.body;
+    }
 
-        return readStream(conn.getInputStream());
+    // ── Retries ───────────────────────────────────────────────────────────
+
+    private static final class HttpResult {
+        final int statusCode;
+        final String body;
+
+        HttpResult(int statusCode, String body) {
+            this.statusCode = statusCode;
+            this.body = body;
+        }
+    }
+
+    /**
+     * Sends a request, retrying network errors and HTTP 429/502/503/504 with exponential backoff.
+     * POST is retried after a network error only when it carries an idempotency key.
+     * PATCH is sent as POST with an override header but is treated as PATCH here.
+     */
+    private HttpResult execute(String method, String url, Map<String, String> headers, byte[] body,
+                               boolean idempotencyKey) throws IOException {
+        boolean retryNetworkErrors = !method.equals("POST") || idempotencyKey;
+        int retry = 0;
+        while (true) {
+            long waitMillis;
+            HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+            try {
+                conn.setRequestMethod(method.equals("PATCH") ? "POST" : method);
+                for (Map.Entry<String, String> header : headers.entrySet()) {
+                    conn.setRequestProperty(header.getKey(), header.getValue());
+                }
+                if (body != null) {
+                    conn.setDoOutput(true);
+                    try (OutputStream os = conn.getOutputStream()) {
+                        os.write(body);
+                    }
+                }
+
+                int statusCode = conn.getResponseCode();
+                if (!isRetryableStatus(statusCode) || retry >= maxRetries) {
+                    if (statusCode == 204) {
+                        return new HttpResult(statusCode, "");
+                    }
+                    String responseBody = readStream(statusCode >= 400 ? conn.getErrorStream() : conn.getInputStream());
+                    return new HttpResult(statusCode, responseBody);
+                }
+                waitMillis = retryDelayMillis(retry + 1, conn.getHeaderField("Retry-After"));
+                readStream(conn.getErrorStream());
+            } catch (IOException e) {
+                if (!retryNetworkErrors || retry >= maxRetries) {
+                    throw e;
+                }
+                waitMillis = retryDelayMillis(retry + 1, null);
+                conn.disconnect();
+            }
+
+            retry++;
+            try {
+                sleeper.sleep(waitMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException("Interrupted while waiting to retry " + method + " " + url);
+            }
+        }
+    }
+
+    private static boolean isRetryableStatus(int statusCode) {
+        return statusCode == 429 || statusCode == 502 || statusCode == 503 || statusCode == 504;
+    }
+
+    /** Delay before retry {@code n} (1 for the first retry). */
+    static long retryDelayMillis(int n, String retryAfter) {
+        Long fromHeader = parseRetryAfterMillis(retryAfter);
+        if (fromHeader != null) {
+            return Math.min(fromHeader, MAX_RETRY_AFTER_MILLIS);
+        }
+        long delay = BASE_DELAY_MILLIS << Math.min(n - 1, 30);
+        delay = Math.min(delay, MAX_DELAY_MILLIS);
+        double jitter = 0.8 + ThreadLocalRandom.current().nextDouble() * 0.4;
+        return Math.round(delay * jitter);
+    }
+
+    private static Long parseRetryAfterMillis(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return null;
+        }
+        String trimmed = value.trim();
+        try {
+            long seconds = Long.parseLong(trimmed);
+            return seconds < 0 ? null : Math.min(seconds, MAX_RETRY_AFTER_MILLIS / 1000) * 1000;
+        } catch (NumberFormatException ignored) {
+            // not a number of seconds: try an HTTP date
+        }
+        try {
+            ZonedDateTime date = ZonedDateTime.parse(trimmed, DateTimeFormatter.RFC_1123_DATE_TIME);
+            long millis = Duration.between(ZonedDateTime.now(date.getZone()), date).toMillis();
+            return Math.max(0, millis);
+        } catch (DateTimeParseException ignored) {
+            return null;
+        }
     }
 
     private String buildURL(String path, Map<String, String> params) {

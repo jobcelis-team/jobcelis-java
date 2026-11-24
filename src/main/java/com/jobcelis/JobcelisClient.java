@@ -48,6 +48,10 @@ public class JobcelisClient {
     private static final long BASE_DELAY_MILLIS = 1_000;
     private static final long MAX_DELAY_MILLIS = 30_000;
     private static final long MAX_RETRY_AFTER_MILLIS = 60_000;
+    /** Connect timeout used when none is set with {@link #setTimeouts}. */
+    public static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 10_000;
+    /** Read timeout used when none is set with {@link #setTimeouts}. */
+    public static final int DEFAULT_READ_TIMEOUT_MILLIS = 30_000;
     private static final Gson GSON = new Gson();
 
     /** Waits between retries; replaced in tests so they do not sleep. */
@@ -58,7 +62,9 @@ public class JobcelisClient {
     private final String apiKey;
     private final String baseURL;
     private final int maxRetries;
-    private String authToken;
+    private volatile String authToken;
+    private volatile int connectTimeoutMillis = DEFAULT_CONNECT_TIMEOUT_MILLIS;
+    private volatile int readTimeoutMillis = DEFAULT_READ_TIMEOUT_MILLIS;
     Sleeper sleeper = Thread::sleep;
 
     /**
@@ -99,6 +105,18 @@ public class JobcelisClient {
     /** How many times a failed request is retried. */
     public int getMaxRetries() {
         return maxRetries;
+    }
+
+    /**
+     * Set the connect and read timeouts of every request, in milliseconds
+     * (defaults: 10 s to connect, 30 s to read). 0 means wait forever.
+     */
+    public void setTimeouts(int connectTimeoutMillis, int readTimeoutMillis) {
+        if (connectTimeoutMillis < 0 || readTimeoutMillis < 0) {
+            throw new IllegalArgumentException("timeouts must be 0 or greater");
+        }
+        this.connectTimeoutMillis = connectTimeoutMillis;
+        this.readTimeoutMillis = readTimeoutMillis;
     }
 
     /** Set JWT bearer token for authenticated requests. */
@@ -173,7 +191,7 @@ public class JobcelisClient {
 
     /** Get event details. */
     public JsonObject getEvent(String eventId) throws JobcelisException, IOException {
-        return get("/api/v1/events/" + eventId);
+        return get("/api/v1/events/" + enc(eventId));
     }
 
     /** List events with cursor pagination. */
@@ -186,7 +204,7 @@ public class JobcelisClient {
 
     /** Delete an event. */
     public void deleteEvent(String eventId) throws JobcelisException, IOException {
-        doDelete("/api/v1/events/" + eventId);
+        doDelete("/api/v1/events/" + enc(eventId));
     }
 
     // ── Simulate ──────────────────────────────────────────────────────────
@@ -235,7 +253,7 @@ public class JobcelisClient {
 
     /** Get webhook details. */
     public JsonObject getWebhook(String webhookId) throws JobcelisException, IOException {
-        return get("/api/v1/webhooks/" + webhookId);
+        return get("/api/v1/webhooks/" + enc(webhookId));
     }
 
     /** List webhooks. */
@@ -255,7 +273,7 @@ public class JobcelisClient {
      * remove rate limiting.</p>
      */
     public JsonObject updateWebhook(String webhookId, Map<String, Object> data) throws JobcelisException, IOException {
-        return patch("/api/v1/webhooks/" + webhookId, data);
+        return patch("/api/v1/webhooks/" + enc(webhookId), data);
     }
 
     /**
@@ -275,17 +293,17 @@ public class JobcelisClient {
             if (maxPerMinute != null) rateLimit.put("max_per_minute", maxPerMinute);
             body.put("rate_limit", rateLimit);
         }
-        return patch("/api/v1/webhooks/" + webhookId, body);
+        return patch("/api/v1/webhooks/" + enc(webhookId), body);
     }
 
     /** Delete a webhook. */
     public void deleteWebhook(String webhookId) throws JobcelisException, IOException {
-        doDelete("/api/v1/webhooks/" + webhookId);
+        doDelete("/api/v1/webhooks/" + enc(webhookId));
     }
 
     /** Get health status for a webhook. */
     public JsonObject webhookHealth(String webhookId) throws JobcelisException, IOException {
-        return get("/api/v1/webhooks/" + webhookId + "/health");
+        return get("/api/v1/webhooks/" + enc(webhookId) + "/health");
     }
 
     /** List available webhook templates. */
@@ -295,7 +313,7 @@ public class JobcelisClient {
 
     /** Send a test delivery to a webhook. */
     public JsonObject testWebhook(String webhookId) throws JobcelisException, IOException {
-        return post("/api/v1/webhooks/" + webhookId + "/test", Map.of());
+        return post("/api/v1/webhooks/" + enc(webhookId) + "/test", Map.of());
     }
 
     // ── Deliveries ────────────────────────────────────────────────────────
@@ -311,7 +329,7 @@ public class JobcelisClient {
 
     /** Retry a failed delivery. */
     public JsonObject retryDelivery(String deliveryId) throws JobcelisException, IOException {
-        return post("/api/v1/deliveries/" + deliveryId + "/retry", Map.of());
+        return post("/api/v1/deliveries/" + enc(deliveryId) + "/retry", Map.of());
     }
 
     // ── Dead Letters ──────────────────────────────────────────────────────
@@ -326,17 +344,17 @@ public class JobcelisClient {
 
     /** Get dead letter details. */
     public JsonObject getDeadLetter(String deadLetterId) throws JobcelisException, IOException {
-        return get("/api/v1/dead-letters/" + deadLetterId);
+        return get("/api/v1/dead-letters/" + enc(deadLetterId));
     }
 
     /** Retry a dead letter. */
     public JsonObject retryDeadLetter(String deadLetterId) throws JobcelisException, IOException {
-        return post("/api/v1/dead-letters/" + deadLetterId + "/retry", Map.of());
+        return post("/api/v1/dead-letters/" + enc(deadLetterId) + "/retry", Map.of());
     }
 
     /** Mark a dead letter as resolved. */
     public JsonObject resolveDeadLetter(String deadLetterId) throws JobcelisException, IOException {
-        return patch("/api/v1/dead-letters/" + deadLetterId + "/resolve", Map.of());
+        return patch("/api/v1/dead-letters/" + enc(deadLetterId) + "/resolve", Map.of());
     }
 
     // ── Replays ───────────────────────────────────────────────────────────
@@ -361,12 +379,12 @@ public class JobcelisClient {
 
     /** Get replay details. */
     public JsonObject getReplay(String replayId) throws JobcelisException, IOException {
-        return get("/api/v1/replays/" + replayId);
+        return get("/api/v1/replays/" + enc(replayId));
     }
 
     /** Cancel a replay. */
     public void cancelReplay(String replayId) throws JobcelisException, IOException {
-        doDelete("/api/v1/replays/" + replayId);
+        doDelete("/api/v1/replays/" + enc(replayId));
     }
 
     // ── Jobs ──────────────────────────────────────────────────────────────
@@ -391,22 +409,22 @@ public class JobcelisClient {
 
     /** Get job details. */
     public JsonObject getJob(String jobId) throws JobcelisException, IOException {
-        return get("/api/v1/jobs/" + jobId);
+        return get("/api/v1/jobs/" + enc(jobId));
     }
 
     /** Update a scheduled job. */
     public JsonObject updateJob(String jobId, Map<String, Object> data) throws JobcelisException, IOException {
-        return patch("/api/v1/jobs/" + jobId, data);
+        return patch("/api/v1/jobs/" + enc(jobId), data);
     }
 
     /** Delete a scheduled job. */
     public void deleteJob(String jobId) throws JobcelisException, IOException {
-        doDelete("/api/v1/jobs/" + jobId);
+        doDelete("/api/v1/jobs/" + enc(jobId));
     }
 
     /** List runs for a scheduled job. */
     public JsonObject listJobRuns(String jobId, int limit) throws JobcelisException, IOException {
-        return get("/api/v1/jobs/" + jobId + "/runs", Map.of("limit", String.valueOf(limit)));
+        return get("/api/v1/jobs/" + enc(jobId) + "/runs", Map.of("limit", String.valueOf(limit)));
     }
 
     /** Preview next occurrences for a cron expression. */
@@ -416,9 +434,28 @@ public class JobcelisClient {
 
     // ── Pipelines ─────────────────────────────────────────────────────────
 
-    /** Create an event pipeline. */
+    /**
+     * Create an event pipeline that delivers to the webhook {@code webhookId}
+     * (the API requires a webhook).
+     */
+    public JsonObject createPipeline(String name, String webhookId, List<String> topics, List<Map<String, Object>> steps) throws JobcelisException, IOException {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("name", name);
+        body.put("webhook_id", webhookId);
+        if (topics != null) body.put("topics", topics);
+        if (steps != null) body.put("steps", steps);
+        return post("/api/v1/pipelines", body);
+    }
+
+    /**
+     * Create an event pipeline without a webhook.
+     *
+     * @deprecated The API requires a {@code webhook_id}, so this call is rejected with HTTP 422.
+     *     Use {@link #createPipeline(String, String, List, List)}.
+     */
+    @Deprecated
     public JsonObject createPipeline(String name, List<String> topics, List<Map<String, Object>> steps) throws JobcelisException, IOException {
-        return post("/api/v1/pipelines", Map.of("name", name, "topics", topics, "steps", steps));
+        return createPipeline(name, null, topics, steps);
     }
 
     /** List pipelines. */
@@ -431,22 +468,24 @@ public class JobcelisClient {
 
     /** Get pipeline details. */
     public JsonObject getPipeline(String pipelineId) throws JobcelisException, IOException {
-        return get("/api/v1/pipelines/" + pipelineId);
+        return get("/api/v1/pipelines/" + enc(pipelineId));
     }
 
     /** Update a pipeline. */
     public JsonObject updatePipeline(String pipelineId, Map<String, Object> data) throws JobcelisException, IOException {
-        return patch("/api/v1/pipelines/" + pipelineId, data);
+        return patch("/api/v1/pipelines/" + enc(pipelineId), data);
     }
 
     /** Delete a pipeline. */
     public void deletePipeline(String pipelineId) throws JobcelisException, IOException {
-        doDelete("/api/v1/pipelines/" + pipelineId);
+        doDelete("/api/v1/pipelines/" + enc(pipelineId));
     }
 
     /** Test a pipeline with a sample payload. */
     public JsonObject testPipeline(String pipelineId, Map<String, Object> payload) throws JobcelisException, IOException {
-        return post("/api/v1/pipelines/" + pipelineId + "/test", payload);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("payload", payload != null ? payload : Map.of());
+        return post("/api/v1/pipelines/" + enc(pipelineId) + "/test", body);
     }
 
     // ── Event Schemas ─────────────────────────────────────────────────────
@@ -466,17 +505,17 @@ public class JobcelisClient {
 
     /** Get event schema details. */
     public JsonObject getEventSchema(String schemaId) throws JobcelisException, IOException {
-        return get("/api/v1/event-schemas/" + schemaId);
+        return get("/api/v1/event-schemas/" + enc(schemaId));
     }
 
     /** Update an event schema. */
     public JsonObject updateEventSchema(String schemaId, Map<String, Object> data) throws JobcelisException, IOException {
-        return patch("/api/v1/event-schemas/" + schemaId, data);
+        return patch("/api/v1/event-schemas/" + enc(schemaId), data);
     }
 
     /** Delete an event schema. */
     public void deleteEventSchema(String schemaId) throws JobcelisException, IOException {
-        doDelete("/api/v1/event-schemas/" + schemaId);
+        doDelete("/api/v1/event-schemas/" + enc(schemaId));
     }
 
     /** Validate a payload against the schema for a topic. */
@@ -500,12 +539,12 @@ public class JobcelisClient {
 
     /** Delete a sandbox endpoint. */
     public void deleteSandboxEndpoint(String endpointId) throws JobcelisException, IOException {
-        doDelete("/api/v1/sandbox-endpoints/" + endpointId);
+        doDelete("/api/v1/sandbox-endpoints/" + enc(endpointId));
     }
 
     /** List requests received by a sandbox endpoint. */
     public JsonObject listSandboxRequests(String endpointId, int limit) throws JobcelisException, IOException {
-        return get("/api/v1/sandbox-endpoints/" + endpointId + "/requests", Map.of("limit", String.valueOf(limit)));
+        return get("/api/v1/sandbox-endpoints/" + enc(endpointId) + "/requests", Map.of("limit", String.valueOf(limit)));
     }
 
     // ── Analytics ─────────────────────────────────────────────────────────
@@ -583,44 +622,44 @@ public class JobcelisClient {
 
     /** Get project by ID. */
     public JsonObject getProjectById(String projectId) throws JobcelisException, IOException {
-        return get("/api/v1/projects/" + projectId);
+        return get("/api/v1/projects/" + enc(projectId));
     }
 
     /** Update a project by ID. */
     public JsonObject updateProjectById(String projectId, Map<String, Object> data) throws JobcelisException, IOException {
-        return patch("/api/v1/projects/" + projectId, data);
+        return patch("/api/v1/projects/" + enc(projectId), data);
     }
 
     /** Delete a project. */
     public void deleteProject(String projectId) throws JobcelisException, IOException {
-        doDelete("/api/v1/projects/" + projectId);
+        doDelete("/api/v1/projects/" + enc(projectId));
     }
 
     /** Set a project as the default. */
     public JsonObject setDefaultProject(String projectId) throws JobcelisException, IOException {
-        return patch("/api/v1/projects/" + projectId + "/default", Map.of());
+        return patch("/api/v1/projects/" + enc(projectId) + "/default", Map.of());
     }
 
     // ── Teams ─────────────────────────────────────────────────────────────
 
     /** List members of a project. */
     public JsonObject listMembers(String projectId) throws JobcelisException, IOException {
-        return get("/api/v1/projects/" + projectId + "/members");
+        return get("/api/v1/projects/" + enc(projectId) + "/members");
     }
 
-    /** Add a member to a project. */
+    /** Add a member to a project. {@code role} defaults to {@code "viewer"} when null. */
     public JsonObject addMember(String projectId, String email, String role) throws JobcelisException, IOException {
-        return post("/api/v1/projects/" + projectId + "/members", Map.of("email", email, "role", role != null ? role : "member"));
+        return post("/api/v1/projects/" + enc(projectId) + "/members", Map.of("email", email, "role", role != null ? role : "viewer"));
     }
 
     /** Update a member's role. */
     public JsonObject updateMember(String projectId, String memberId, String role) throws JobcelisException, IOException {
-        return patch("/api/v1/projects/" + projectId + "/members/" + memberId, Map.of("role", role));
+        return patch("/api/v1/projects/" + enc(projectId) + "/members/" + enc(memberId), Map.of("role", role));
     }
 
     /** Remove a member from a project. */
     public void removeMember(String projectId, String memberId) throws JobcelisException, IOException {
-        doDelete("/api/v1/projects/" + projectId + "/members/" + memberId);
+        doDelete("/api/v1/projects/" + enc(projectId) + "/members/" + enc(memberId));
     }
 
     // ── Invitations ───────────────────────────────────────────────────────
@@ -632,12 +671,12 @@ public class JobcelisClient {
 
     /** Accept an invitation. */
     public JsonObject acceptInvitation(String invitationId) throws JobcelisException, IOException {
-        return post("/api/v1/invitations/" + invitationId + "/accept", Map.of());
+        return post("/api/v1/invitations/" + enc(invitationId) + "/accept", Map.of());
     }
 
     /** Reject an invitation. */
     public JsonObject rejectInvitation(String invitationId) throws JobcelisException, IOException {
-        return post("/api/v1/invitations/" + invitationId + "/reject", Map.of());
+        return post("/api/v1/invitations/" + enc(invitationId) + "/reject", Map.of());
     }
 
     // ── Audit ─────────────────────────────────────────────────────────────
@@ -681,7 +720,7 @@ public class JobcelisClient {
 
     /** Accept consent for a specific purpose. */
     public JsonObject acceptConsent(String purpose) throws JobcelisException, IOException {
-        return post("/api/v1/me/consents/" + purpose + "/accept", Map.of());
+        return post("/api/v1/me/consents/" + enc(purpose) + "/accept", Map.of());
     }
 
     /** Export all personal data (GDPR data portability). */
@@ -689,9 +728,11 @@ public class JobcelisClient {
         return get("/api/v1/me/data");
     }
 
-    /** Request restriction of data processing. */
-    public JsonObject restrictProcessing() throws JobcelisException, IOException {
-        return post("/api/v1/me/restrict", Map.of());
+    /** Request restriction of data processing. The API asks for the account password. */
+    public JsonObject restrictProcessing(String password) throws JobcelisException, IOException {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("password", password);
+        return post("/api/v1/me/restrict", body);
     }
 
     /** Lift restriction on data processing. */
@@ -724,7 +765,7 @@ public class JobcelisClient {
 
     /** Revoke an embed token. */
     public void revokeEmbedToken(String id) throws JobcelisException, IOException {
-        doDelete("/api/v1/embed/tokens/" + id);
+        doDelete("/api/v1/embed/tokens/" + enc(id));
     }
 
     // ── Notification Channels ────────────────────────────────────────────
@@ -756,9 +797,14 @@ public class JobcelisClient {
         return get("/api/v1/retention");
     }
 
-    /** Update retention policy. */
+    /**
+     * Update retention policy, for example
+     * {@code Map.of("events_days", 30, "deliveries_days", 14, "audit_logs_days", 90)}.
+     */
     public JsonObject updateRetentionPolicy(Map<String, Object> policy) throws JobcelisException, IOException {
-        return patch("/api/v1/retention", policy);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("retention_policy", policy);
+        return patch("/api/v1/retention", body);
     }
 
     /** Preview a purge operation. */
@@ -778,9 +824,12 @@ public class JobcelisClient {
         return get("/health");
     }
 
-    /** Get platform status. */
+    /**
+     * Get platform status. Same as {@link #health()}: {@code /status} is the public status
+     * web page, not a JSON endpoint.
+     */
     public JsonObject status() throws JobcelisException, IOException {
-        return get("/status");
+        return health();
     }
 
     // ── Private HTTP helpers ──────────────────────────────────────────────
@@ -902,6 +951,8 @@ public class JobcelisClient {
             long waitMillis;
             HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
             try {
+                conn.setConnectTimeout(connectTimeoutMillis);
+                conn.setReadTimeout(readTimeoutMillis);
                 conn.setRequestMethod(method.equals("PATCH") ? "POST" : method);
                 for (Map.Entry<String, String> header : headers.entrySet()) {
                     conn.setRequestProperty(header.getKey(), header.getValue());
@@ -975,6 +1026,14 @@ public class JobcelisClient {
         } catch (DateTimeParseException ignored) {
             return null;
         }
+    }
+
+    /** Percent-encodes one path segment (spaces as %20, slashes escaped). */
+    static String enc(String segment) {
+        if (segment == null) {
+            throw new IllegalArgumentException("path parameter must not be null");
+        }
+        return URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     private String buildURL(String path, Map<String, String> params) {

@@ -12,19 +12,23 @@ All API calls go to `https://jobcelis.com` by default -- you only need your API 
 <dependency>
     <groupId>com.jobcelis</groupId>
     <artifactId>jobcelis</artifactId>
-    <version>1.0.0</version>
+    <version>1.5.0</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'com.jobcelis:jobcelis:1.0.0'
+implementation 'com.jobcelis:jobcelis:1.5.0'
 ```
 
 ## Requirements
 
 - Java 11+
+
+> **Blocking client.** Every method performs a synchronous HTTP request (`HttpURLConnection`) and blocks the calling thread until the response arrives (or the timeout and retries run out). On Android, never call it on the main thread: use a background thread, an `ExecutorService` or WorkManager.
+
+> **Keep your API key secret.** The project API key gives full access to your project. Do not embed it in mobile apps, desktop apps or any other code that runs on your users' devices, where it can be extracted. Call Jobcelis from your own backend, or give clients a scoped embed token (`createEmbedToken`) instead.
 
 ## Quick Start
 
@@ -169,7 +173,8 @@ var preview = client.cronPreview("0 9 * * *", 10);
 ## Pipelines
 
 ```java
-var pipeline = client.createPipeline("order-processing",
+// The pipeline delivers to an existing webhook (required by the API)
+var pipeline = client.createPipeline("order-processing", "wh_abc123",
     List.of("order.created"),
     List.of(
         Map.of("type", "filter", "config", Map.of("field", "amount", "gt", 100)),
@@ -183,8 +188,8 @@ client.updatePipeline("pipe_abc123", Map.of("name", "order-processing-v2"));
 client.deletePipeline("pipe_abc123");
 
 // Test a pipeline with a sample payload
-var result = client.testPipeline("pipe_abc123",
-    Map.of("topic", "order.created", "payload", Map.of("id", "1")));
+// (sent as {"payload": {...}})
+var result = client.testPipeline("pipe_abc123", Map.of("id", "1", "amount", 150));
 ```
 
 ## Event Schemas
@@ -255,6 +260,7 @@ client.deleteProject("proj_abc123");
 ```java
 var members = client.listMembers("proj_abc123");
 var member = client.addMember("proj_abc123", "alice@example.com", "admin");
+// role: "admin", "editor" or "viewer" (default "viewer")
 client.updateMember("proj_abc123", "mem_abc123", "viewer");
 client.removeMember("proj_abc123", "mem_abc123");
 ```
@@ -290,7 +296,7 @@ client.exportAuditLog("csv");
 var consents = client.getConsents();
 client.acceptConsent("marketing");
 var myData = client.exportMyData();
-client.restrictProcessing();
+client.restrictProcessing("your_account_password"); // the API asks for the password
 client.liftRestriction();
 client.objectToProcessing();
 client.restoreConsent();
@@ -300,7 +306,7 @@ client.restoreConsent();
 
 ```java
 var health = client.health();
-var status = client.status();
+var status = client.status(); // same as health(): GET /health
 ```
 
 ## Error Handling
@@ -333,6 +339,14 @@ Change or disable retries with the third constructor argument:
 ```java
 var client = new JobcelisClient("your_api_key", "https://jobcelis.com", 3); // at most 3 retries
 var noRetries = new JobcelisClient("your_api_key", "https://jobcelis.com", 0); // disabled
+```
+
+## Timeouts
+
+Each request waits at most 10 seconds to connect and 30 seconds for the response (per attempt; a timeout counts as a network error and is retried as above). Change them with:
+
+```java
+client.setTimeouts(5_000, 60_000); // connect, read (milliseconds)
 ```
 
 ## Webhook Signature Verification

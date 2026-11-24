@@ -259,8 +259,8 @@ client.deleteProject("proj_abc123");
 
 ```java
 var members = client.listMembers("proj_abc123");
-var member = client.addMember("proj_abc123", "alice@example.com", "admin");
-// role: "admin", "editor" or "viewer" (default "viewer")
+var member = client.addMember("proj_abc123", "alice@example.com", "editor");
+// role: "editor" or "viewer" (default "viewer")
 client.updateMember("proj_abc123", "mem_abc123", "viewer");
 client.removeMember("proj_abc123", "mem_abc123");
 ```

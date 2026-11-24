@@ -647,7 +647,7 @@ public class JobcelisClient {
         return get("/api/v1/projects/" + enc(projectId) + "/members");
     }
 
-    /** Add a member to a project. {@code role} defaults to {@code "viewer"} when null. */
+    /** Add a member to a project. {@code role} is {@code "editor"} or {@code "viewer"} (the default when null). */
     public JsonObject addMember(String projectId, String email, String role) throws JobcelisException, IOException {
         return post("/api/v1/projects/" + enc(projectId) + "/members", Map.of("email", email, "role", role != null ? role : "viewer"));
     }
